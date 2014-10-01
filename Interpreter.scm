@@ -1,6 +1,5 @@
-;George Hodulik EECS 345 Project 1
-(load "verySimpleParser.scm")
-
+;George Hodulik Project 2 EECS 345
+(load "loopSimpleParser.scm")
 ;My interpreter does not implement the "extra challenge" features.
 ;My general code convention:
 ;Parameter code indicates code that could have come from the parser, ie, one or more statements contained in a list
@@ -13,25 +12,36 @@
 
 ;takes code and environment and returns the environment or the environment of the next statememnt
 (define Mstate
-  (lambda (code environment)
+  (lambda (code environment return next break continue)
+   ; (begin (display environment)
     (cond
-      ((null? code) environment)
-      (else (Mstatement code environment)))))
-                    
+      ((null? code) (next environment))
+      (else (Mstatement (nextstatement code) environment return (lambda (env) (Mstate (remainingstatements code) env return
+                                                                                      next break continue))
+                                                                  break continue)))))
+           ;)     
 ;takes code an an environment and acts upod the nextstatement
 (define Mstatement
-  (lambda (code environment)
+  (lambda (statement environment return next break continue)
     (cond
-      ;if this is reached, then there was no return statement in the program
-      ((null? code) environment)
+      ;if this is reached, perform the next action on the resulting environment
+      ((null? statement) (next environment))
+      ;if this is a block, call Mstate on it, with a new layer to the environment, and be sure to cdr off that layer when next, break, or continue is called
+      ((block? statement) (Mstate (remainingstatements statement) (addLayer environment) return (lambda (v) (next (cdr v))) (lambda (v) (break (cdr v))) (lambda (v) (continue (cdr v))) ))
       ;calls if statement if nextstatement is if: note, remaining statements is a parameter, since the if statement could have a return, or it could continue
-      ((if? (nextstatement code)) (evaluate-if (nextstatement code) environment (remainingstatements code)))
-      ;calls return if the nextstatement is an if
-      ((return? (nextstatement code)) (return (nextstatement code) environment))
+      ((if? statement) (evaluate-if statement environment return next break continue))
+      ;calls return if the nextstatement is a return
+      ((return? statement) (Mreturn statement environment return))
       ;calls assign if the nextstatement is an assignment
-      ((=? (nextstatement code)) (Mstate (remainingstatements code) (assign (getvarname (nextstatement code)) (getvarvalue (nextstatement code)) environment environment 'assign)))
+      ((=? statement) (next (assign (getvarname statement) (getvarvalue statement) environment environment 'assign)))
       ;calls declarevar if the next statement is a declare
-      ((declaration? (nextstatement code)) (Mstate (remainingstatements code) (declarevar (nextstatement code) environment))))))
+      ((declaration? statement) (next (declarevar statement environment)))
+      ;if this is a break, call break
+      ((break? statement) (break environment))
+      ;if this is a continue, call continue
+      ((continue? statement) (continue environment))
+      ;if this is a while, call whileloop
+      ((while? statement) (whileloop statement environment return next break continue)))))
 
 ;gets the nextstatement from code. returns a statement
 (define nextstatement
@@ -43,34 +53,74 @@
   (lambda (code)
     (cdr code)))
 
+;add a layer to an environment
+(define addLayer
+  (lambda (environment)
+    (cons '() environment)))
+
+;checks if a statement is a block
+(define block?
+  (lambda (statement)
+    (eq? (car statement) 'begin)))
 
 ;checks if a statement is an if statement
 (define if?
   (lambda (statement)
-    (cond
-      ((eq? (car statement) 'if) #t) 
-      (else #f))))
+    (eq? (car statement) 'if)))
 
 ;checks if a staement is an assignment statement
 (define =?
   (lambda (statement)
-    (cond
-      ((eq? (car statement) '=) #t) 
-      (else #f))))
+    (eq? (car statement) '=)))
 
 ;checks if a statement is a declaration
 (define declaration?
   (lambda (statement)
-    (cond
-      ((and (eq? (car statement) 'var) ) #t) ;(null? (cddr statement)) 
-      (else #f))))
+    (eq? (car statement) 'var)))
 
 ;checks if a statement is a return statement
 (define return?
   (lambda (statement)
+      (eq? (car statement) 'return)))
+
+;checks if a statement is a while
+(define while?
+  (lambda (statement)
     (cond
-      ((eq? (car statement) 'return) #t) 
+      ((eq? (car statement) 'while) #t)
       (else #f))))
+
+;checks if a statement is a break
+(define break?
+  (lambda (statement)
+    (eq? (car statement) 'break)))
+
+;checks if a statement is a continue
+(define continue?
+  (lambda (statement)
+    (eq? (car statement) 'continue)))
+
+;gets the condition of a while
+(define whilecondition
+  (lambda (statement)
+    (cadr statement)))
+
+;gets the body of a while
+(define whilebody
+  (lambda (statement)
+    (caddr statement)))
+
+;while loop
+(define whileloop
+ (lambda (statement environment return next break continue)
+   (letrec ((loop (lambda (condition body environment next)
+               ;if the condition is true, call Mstatement, with the approriate next, break, annd continue
+                    ;else call next
+               (if (eval-expression condition environment pprefix)
+                  (Mstatement body environment return (lambda (env) (loop condition body env next)) (lambda (env) (next env)) 
+                             (lambda (env) (loop condition body env next)))
+                  (next environment)))))
+       (loop (whilecondition statement) (whilebody statement) environment next))))
 
 ;calls assignment when theres a declaration, with parameter assigntype of 'declaration
 (define declarevar
@@ -88,21 +138,37 @@
 ;note that there are two environment parameters: environment is searched through to find the var while old-environment does not change
 ;This is because an assignment value may need to be evaluated, and if it has other variables in the expression, eval-expression needs
 ;that environment to properly determine a value
+;There are two assign functions, assign goes through each layer in the environment and decides which one the assignment will take place
+;Note assign takes an environment of the form (()) or ( ((x 3) (y 2)) ((z 2) (x 5)) ), or layers of environments
+;whereas assignLayer takes an environment of the form () or ((x 3) (y 2)), or a single environment
 (define assign
+  (lambda (varname value environment original-environment assigntype)
+    (cond
+      ((and (null? environment) (eq? assigntype 'assign)) (error "variable not declared"))
+      ((and (eq? assigntype 'declaration) (eq? (lookupLayer varname (car environment)) '())) 
+       (cons (assignLayer varname value (car environment) original-environment assigntype) (cdr environment)))
+      ((eq? assigntype 'declaration) (error "redefining of variable"))
+      ((eq? (lookupLayer varname (car environment)) '()) (cons (car environment) (assign varname value (cdr environment) original-environment assigntype)))
+      (else (cons (assignLayer varname value (car environment) original-environment assigntype) (cdr environment))))))
+    
+;assignLayer assigns a value for a specific layer
+(define assignLayer
   (lambda (varname value environment original-environment assigntype)
     (cond
       ;if the environment is empty and this is an assignment, then the variable was not declared
       ((and (null? environment) (eq? assigntype 'assign)) (error "variable not declared"))
       ;if the environment is empty and this is a declaration w/o assignment value, then add the variable with value 'error
-      ((and (null? environment) (eq? assigntype 'declaration) (eq? value 'error) (cons (list varname 'error) '())))
-      ;if this variable has a non-error assignment value, evaluate the value and assign it
-      ((and (null? environment) (eq? assigntype 'declaration)) (cons (list varname (eval-expression value original-environment pprefix)) '()))
+      ((and (null? environment) (eq? assigntype 'declaration) (eq? value 'error) (cons (list varname (box 'error)) '())))
+      ;if this variable has a non-error assignment value and is a declaration, evaluate the value and assign it
+      ((and (null? environment) (eq? assigntype 'declaration)) (cons (list varname (box (eval-expression value original-environment pprefix))) '()))
       ;if the var is reached but this is a declaration, the variable is being redeclared
       ((and (eq? (caar environment) varname) (eq? assigntype 'declaration) (error "redefining of variable")))
       ;if the var is reached otherwise, update its value
-      ((eq? (caar environment) varname) (cons (list varname (eval-expression value original-environment pprefix)) (cdr environment)))
+      ((eq? (caar environment) varname) (cons (list varname (box (eval-expression value original-environment pprefix))) (cdr environment)))
       ;otherwise recurse
-      (else (cons (car environment) (assign varname value (cdr environment) original-environment assigntype))))))
+      (else (cons (car environment) (assignLayer varname value (cdr environment) original-environment assigntype))))))
+
+
 
 ;gets varname from statement: expects statement in form of (var x value) where x is varname and value is a value or expression
 (define getvarname
@@ -115,11 +181,21 @@
     (caddr statement)))
 
 ;retuns the value of a variable, '() if it is not declared
-(define lookup
+;Like assign and assignLayer, lookuLayer looks up a var in a particular layer of the environment, while lookup
+;determines which layer of the environment the var will be looked up in
+(define lookupLayer
   (lambda (var environment)
     (cond
       ((null? environment) '())
-      ((eq? (caar environment) var) (cadar environment))
+      ((eq? (caar environment) var) (unbox (cadar environment)))
+      (else (lookupLayer var (cdr environment))))))
+
+;lookup determines which layer of the environment (or the first appearance) contains var, and calls lookupList to get its value
+(define lookup
+  (lambda (var environment)
+    (cond
+      ((null? environment) (error "variable not declared"))
+      ((not (null? (lookupLayer var (car environment)))) (lookupLayer var (car environment)))
       (else (lookup var (cdr environment))))))
 
 ;returns the return expression in a return statement
@@ -128,9 +204,9 @@
     (cadr statement)))
 
 ;returns the value of the return expression
-(define return
-  (lambda (code environment)
-    (make-english (eval-expression (returnexpression code) environment pprefix))))
+(define Mreturn
+  (lambda (code environment return)
+    (return (make-english (eval-expression (returnexpression code) environment pprefix)))))
 
 ;translates scheme words to "English," for now this is only for #t and #f to 'true and 'false
 (define make-english
@@ -142,14 +218,14 @@
 
 ;evaluates an if statement
 (define evaluate-if
-  (lambda (ifstatement environment remainingcode)
+  (lambda (ifstatement environment return next break continue)
     (cond
       ;checks if the if statement is true, returns the state ofthe expression if it is
-      ((eval-expression (ifcond ifstatement) environment pprefix) (Mstate (cons (nextstatement (ifexpr ifstatement)) remainingcode) environment))
+      ((eval-expression (ifcond ifstatement) environment pprefix) (Mstatement (nextstatement (ifexpr ifstatement)) environment return next break continue))
       ;if the condition was false and there is no else, the continue with the remaining code
-      ((null? (ifelse ifstatement)) (Mstate remainingcode environment))
+      ((null? (ifelse ifstatement)) (next environment))
       ;if there was an else, then Mstate with the else's if statement
-      (else (Mstate (cons (nextstatement (ifelse ifstatement)) remainingcode) environment)))))
+      (else (Mstatement (nextstatement (ifelse ifstatement)) environment return next break continue)))))
 
 ;returns the condition expression in the if statement
 (define ifcond
@@ -220,11 +296,11 @@
   (lambda (form)
     (car (form))))
 
-; retrieves the left-operand function from the format   ;PROBLEMS HERE
+; retrieves the left-operand function from the format   ;PROBLEMS HERE -- Actually I don't think there are...
 (define get-left-operand
   (lambda (form)
     (cond
-      ((null? (cddr (form))) 0)
+      ((null? (cddr (form))) 0)  ;This maybe should be commented out but I have not tested
       (else (cadr (form))))))
 
 ; retrieves the right-operand function from the format
@@ -250,10 +326,15 @@
   (lambda ()
     (list car cadr caddr)))
 
-;iterprets code by calling Mstate
+(define newEnvironment
+  '(()))
+
+;interprets code by calling Mstate
 (define interpret
   (lambda (filename)
-    (legitimize (Mstate (parser filename) '()))))
+    (legitimize 
+     (call/cc (lambda (return)
+       (Mstate (parser filename) newEnvironment return (lambda (v)  v) (lambda (v) v) (lambda (v) v)))))))
 
 ;legitimizes return value: ie, if it is not a number or boolean, that means a return statement was not reached
 (define legitimize
@@ -273,7 +354,25 @@
       ((null? tests) '())
       (else (cons (interpret (car tests)) (doTests (cdr tests)))))))
 
+;Below is test code.  There is no point in uncommenting the below code, since the file locations of test files will not be the
+;same on computers other than mine.
+;tests for part 2
 ;(doTests 
- ;'("Test1/test1.txt" "Test1/test2.txt" "Test1/test3.txt" "Test1/test4.txt" "Test1/test5.txt" "Test1/test6.txt" 
-  ;                   "Test1/test7.txt" "Test1/test8.txt" "Test1/test9.txt" "Test1/test10.txt")); "test11.txt" "test12.txt" "test13.txt" "test14.txt" "test15.txt" "test16.txt" "test17.txt" "test18.txt" "test19.txt" "test20.txt" "test21.txt" "test22.txt" "test23.txt" "test24.txt"))
+ ;'("test25.txt" "test26.txt" 
+ ;"test27.txt" "test28.txt" "test29.txt" "test30.txt" "test31.txt" ))
+ ;              '("test34.txt")); "test33.txt" "test34.txt" 
+ ;"test35.txt" 
+ ;"test36.txt""test37.txt"))
+
+;100 20 6 -1 789 2 164 error error error 12 32 21
+
+
+;test for part 1
+;(doTests 
+ ;'("Test1/test1.txt"  "Test1/test2.txt" "Test1/test3.txt" "Test1/test4.txt" "Test1/test5.txt" "Test1/test6.txt" 
+  ;                  "Test1/test7.txt" "Test1/test8.txt" "Test1/test9.txt" "Test1/test10.txt" "Test1/test15.txt" "Test1/test16.txt" 
+   ;               "Test1/test17.txt" "Test1/test18.txt")); "test19.txt" "test20.txt" "test21.txt" "test22.txt" "test23.txt" "test24.txt"))
  ;(150 -4 10 16 220 5 6 10 5 -39 error error error error true 100 false true 30 11 1106 12 16 72)
+
+ 
+;"test11.txt" "test12.txt" "test13.txt" "test14.txt" 
