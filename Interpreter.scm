@@ -1,5 +1,16 @@
-;George Hodulik Project 2 EECS 345
+;George Hodulik Project 5 EECS 345
 (load "classParser.scm")
+
+;PROJECT 5 ---
+;My interpreter does not work for everything, but it works for many if not most things.
+;Of our sample tests, 1,2,3,4,5,6,9,11,12,14,15 work.
+;Try/catch works
+;object instantiation works
+;any combination of dot expressions can be called on objects and they should work: ie c.m().g.s() and x.y.z.f1().f2().g should both work
+;calling this and super works sometimes but not all of the time.  Part of this is due to the way I handled super, which I
+;explained at the buildInstanceEnv2 function.
+;-----
+
 ;My interpreter does NOT implement method overloading
 ;My interpreter DOES implement the extra challenge of call by reference, but does NOT do statements with side effects.
 ;My general code convention:
@@ -16,40 +27,100 @@
 
 ;takes code and environment and returns the environment or the environment of the next statememnt
 (define Mstate
-  (lambda (code environment return next break continue currclass parent globalEnv)
+  (lambda (code environment return next break continue currclass parent globalEnv throw)
     (cond
       ((null? code) (next environment))
       (else (Mstatement (nextstatement code) environment return (lambda (env) (Mstate (remainingstatements code) env return
-                                                                                      next break continue currclass parent globalEnv))
-                                                                  break continue currclass parent globalEnv)))))
+                                                                                      next break continue currclass parent globalEnv throw))
+                                                                  break continue currclass parent globalEnv throw)))))
             
 ;takes code an an environment and acts upod the nextstatement
 (define Mstatement
-  (lambda (statement environment return next break continue currclass parent globalEnv) 
+  (lambda (statement environment return next break continue currclass parent globalEnv throw)
     (cond
       ;if this is reached, perform the next action on the resulting environment
       ((null? statement) (next environment))
       ;If it is a function call
-      ((funcall? statement) (begin (call-function (cadr statement) (cddr statement) environment currclass parent globalEnv) (next environment)));(next (Mstatefunc statement environment)))
+      ((funcall? statement) (begin (call-function (cadr statement) (cddr statement) environment currclass parent globalEnv throw) (next environment)));(next (Mstatefunc statement environment)))
       ;if this is a block, call Mstate on it, with a new layer to the environment, and be sure to cdr off that layer when next, break, or continue is called
       ((block? statement) (Mstate (remainingstatements statement) (addLayer environment) return 
-                                  (lambda (v) (next (cdr v))) (lambda (v) (break (cdr v))) (lambda (v) (continue (cdr v))) currclass parent globalEnv))
+                                  (lambda (v) (next (cdr v))) (lambda (v) (break (cdr v))) (lambda (v) (continue (cdr v))) currclass parent globalEnv throw))
+      ;if this is a try, call the try then call next on the environment afterward.  This ensures the integrety of the environment
+      ((try? statement) (begin (call-try statement environment return next break continue currclass parent globalEnv throw) (next environment)))
       ;calls if statement if nextstatement is if: note, remaining statements is a parameter, since the if statement could have a return, or it could continue
-      ((if? statement) (evaluate-if statement environment return next break continue currclass parent globalEnv))
+      ((if? statement) (evaluate-if statement environment return next break continue currclass parent globalEnv throw))
       ;calls return if the nextstatement is a return
-      ((return? statement) (Mreturn statement environment return currclass parent globalEnv))
+      ((return? statement) (Mreturn statement environment return currclass parent globalEnv throw))
       ;calls assign if the nextstatement is an assignment
-      ((=? statement) (next (assign (getvarname statement) (getvarvalue statement) environment environment 'assign currclass parent globalEnv)))
-      ;calls declarevar if the next statement is a declare
-      ((declaration? statement) (next (declarevar statement environment environment currclass parent globalEnv)))
+      ((=? statement) (next (begin (assign (getvarname statement) (getvarvalue statement) environment environment 'assign currclass parent globalEnv throw)
+                                   environment)))
+                      
+                      ;calls declarevar if the next statement is a declare
+      ((declaration? statement) (next (declarevar statement environment environment currclass parent globalEnv throw)))
       ;if this is a break, call break
       ((break? statement)  (break environment))
       ;if this is a continue, call continue
       ((continue? statement) (continue environment))
+      ;if this is a throw, evaluate the throw value (this should be an object, but could be a number. eval-expression will handle both)
+      ((throw? statement) (throw (eval-expression (cadr statement) environment pprefix currclass parent globalEnv throw)))
       ;if this is a while, call whileloop
-      ((while? statement) (whileloop statement environment return next break continue currclass parent globalEnv)))))
+      ((while? statement) (whileloop statement environment return next break continue currclass parent globalEnv throw)))))
 
+;abstraction for try block
+(define throw?
+  (lambda (statement)
+    (eq? 'throw (car statement))))
 
+(define gettryblock
+  (lambda (statement)
+    (cadr statement)))
+
+(define getcatchblock
+  (lambda (statement)
+    (if (null? (caddr statement))
+        '()
+        (cadr (cdaddr statement)))))
+
+(define getcatchparam
+  (lambda (statement)
+    (if (null? (caddr statement))
+        '()
+        (caar (cdaddr statement)))))
+
+(define getfinblock
+  (lambda (statement)
+    (if (null? (cadddr statement))
+        '()
+        (cadr (cadddr statement)))))
+     
+;This is where a try block is handled.  Note that I do not need to add layers to the environment really because of the nature of blocks
+;In Mstate, next will be called on the original environment, so it doesnt matter how new variables are added in the try because
+;any changes to the original environment will be kept because of blocks.
+(define call-try
+  (lambda (statement environment return next break continue currclass parent globalEnv throw)
+   (call/cc (lambda (jump)
+              (Mstate (gettryblock statement) (addLayer environment) return (lambda (env) (next (Mstate (getfinblock statement) environment
+                                                                                                  return next break continue currclass parent globalEnv throw)))
+                      (lambda (env) (break (Mstate (getfinblock statement) environment
+                                                                        return next break continue currclass parent globalEnv throw)))
+                      (lambda (env) (continue (Mstate (getfinblock statement) environment
+                                                                        return next break continue currclass parent globalEnv throw)))
+                      currclass parent globalEnv 
+                      (lambda (caught) (jump (Mstate (getcatchblock statement) (addBinding (getcatchparam statement) caught environment) 
+                                                     return (lambda (env) (next (Mstate (getfinblock statement) environment
+                                                                        return next break continue currclass parent globalEnv throw)))
+                      break continue currclass parent globalEnv throw)))
+                      )))))
+;adds the thrown object to the environment        
+(define addBinding
+  (lambda (varname obj env)
+    (cons (list (list varname (box obj))) env))) 
+                    
+(define try?
+  (lambda (statement)
+    (eq? 'try (car statement))))
+
+;abstraction: for some reason extra layers were building up
 (define cutofflayers
   (lambda (classbody)
     (car (cddar classbody))))
@@ -58,13 +129,13 @@
 ;but I think sometimes just an atom is passed.  I dealt with this lazily by allowing both cases.
 ;return values are of the form '((parent) (classdefinition))
 (define lookupClass
-  (lambda (classname globalenv)
+  (lambda (classname globalEnv) 
     (cond
-      ((null? globalenv) 'classNotFound)
-      ((null? (car globalenv)) 'classNotFound)
-      ((and (list? classname) (not (null? classname))) (lookupClass (car classname) globalenv))
-      ((eq? classname (caar globalenv)) (list (cadar globalenv) (cutofflayers globalenv)))
-      (else (lookupClass classname (cdr globalenv))))))
+      ((null? globalEnv) 'classNotFound)
+      ((null? (car globalEnv)) 'classNotFound)
+      ((and (list? classname) (not (null? classname))) (lookupClass (car classname) globalEnv))
+      ((eq? classname (caar globalEnv)) (list (cadar globalEnv) (cutofflayers globalEnv)))
+      (else (lookupClass classname (cdr globalEnv))))))
 
 ;builds a class given its name, parent body, and a global environment
 ;returns value of the form '(classname (parent) classdefinition) where the classdefinition is made basically from P3's function builder
@@ -72,7 +143,7 @@
 ;much of a distinction between static and non static methods
 (define Mstate-class-build
   (lambda (classname parent body globalEnv)
-    (list classname parent (Mstate-build body '() newEnvironment '() classname parent globalEnv))))
+    (list classname parent (Mstate-build body '() newEnvironment '() classname parent globalEnv (lambda (v) v)))))
 
 ;I've separated the variable declarations for a class into static vars and non static vars.
 ;however, because a declaration could inlude other variables or functions on the right hand side, I made this function to build the
@@ -84,15 +155,15 @@
 ;Basically the same Mstate-build from P3, except I've distinguished static vars and non static vars
 ;Right now, static and non static methods are recognized as differnent but are treated the same way.
 (define Mstate-build
-  (lambda (code environment vars staticvars currclass parent globalEnv)
+  (lambda (code environment vars staticvars currclass parent globalEnv throw)
     (cond
       ((null? code) (evalenv staticvars vars environment))
-      ((declaration? (nextstatement code)) (Mstate-build (cdr code) environment (declarevar (nextstatement code) vars (evalenv staticvars vars environment) currclass parent globalEnv)
-                                                         staticvars currclass parent globalEnv))
+      ((declaration? (nextstatement code)) (Mstate-build (cdr code) environment (declarevar (nextstatement code) vars (evalenv staticvars vars environment) currclass parent globalEnv throw)
+                                                         staticvars currclass parent globalEnv throw))
       ((staticdecl? (nextstatement code)) (Mstate-build (cdr code) environment vars (Mstate-static-vars (nextstatement code) staticvars 
-                                                                                                        (evalenv staticvars vars environment) currclass parent globalEnv) currclass parent globalEnv))
-      ((function-decl? (nextstatement code)) (Mstate-build (cdr code) (Mstatefunc (nextstatement code) environment) vars staticvars currclass parent globalEnv))
-      ((static-function-decl? (nextstatement code)) (Mstate-build (cdr code) (Mstatefunc (nextstatement code) environment) vars staticvars currclass parent globalEnv))
+                                                                                                        (evalenv staticvars vars environment) currclass parent globalEnv throw) currclass parent globalEnv throw))
+      ((function-decl? (nextstatement code)) (Mstate-build (cdr code) (Mstatefunc (nextstatement code) environment) vars staticvars currclass parent globalEnv throw))
+      ((static-function-decl? (nextstatement code)) (Mstate-build (cdr code) (Mstatefunc (nextstatement code) environment) vars staticvars currclass parent globalEnv throw))
       (else (error "Invalid operations outside of main function")))))
 
 ;checks if the statement isa static declaration
@@ -103,10 +174,10 @@
 ;Builds the list of static vars.  
 ;Basically the same function as declarevar, but the environment expected for declarevar is slightly different
 (define Mstate-static-vars
-  (lambda (statement staticvars env currclass parent globalEnv)
+  (lambda (statement staticvars env currclass parent globalEnv throw)
     (if (null? (cddr statement))
         (cons (list (getvarname statement) (box 'error)) staticvars)
-        (cons (list (getvarname statement) (box (eval-expression (getvarvalue statement) env pprefix currclass parent globalEnv))) staticvars))))
+        (cons (list (getvarname statement) (box (eval-expression (getvarvalue statement) env pprefix currclass parent globalEnv throw))) staticvars))))
 
 ;gets the nextstatement from code. returns a statement
 (define nextstatement
@@ -126,7 +197,9 @@
 ;checls if the statement is a function call
 (define funcall?
   (lambda (statement)
-    (eq? (car statement) 'funcall)))
+    (cond
+      ((list? statement) (eq? (car statement) 'funcall))
+      (else #f))))
 
 ;checks if a statement is a function
 (define function-decl?
@@ -175,6 +248,8 @@
   (lambda (statement)
     (eq? (car statement) 'break)))
 
+
+
 ;checks if a statement is a continue
 (define continue?
   (lambda (statement)
@@ -204,13 +279,13 @@
 ;the environment from when the function is called.  Note that when there is an &, the get-box function is called rather 
 ;than eval-expression
 (define fenvironment
-  (lambda (fparams cparams environment currclass parent globalEnv) 
+  (lambda (fparams cparams environment currclass parent globalEnv throw) 
     (cond
       ((and (null? fparams) (null? cparams)) (cdr environment))
       ((or (null? fparams) (null? cparams)) (error "Parameter mistmatch"))
-      ((eq? (car fparams) '&) (cons (list (list (cadr fparams) (get-box (car cparams) environment))) (fenvironment (cddr fparams) (cdr cparams) environment)))
-      (else (cons (list (car fparams) (box (eval-expression (car cparams) environment pprefix currclass parent globalEnv))) 
-                  (fenvironment (cdr fparams) (cdr cparams) environment currclass parent globalEnv))))))
+      ((eq? (car fparams) '&) (cons (list (list (cadr fparams) (get-box (car cparams) environment))) (fenvironment (cddr fparams) (cdr cparams) environment currclass parent globalEnv throw)))
+      (else (cons (list (car fparams) (box (eval-expression (car cparams) environment pprefix currclass parent globalEnv throw))) 
+                  (fenvironment (cdr fparams) (cdr cparams) environment currclass parent globalEnv throw))))))
 
 ;get-box and lookupBox are identical to lookup and lookupLayer, except they do not unbox the var's value
 (define get-box
@@ -239,25 +314,25 @@
 
 ;while loop
 (define whileloop
- (lambda (statement environment return next break continue currclass parent globalEnv)
-   (letrec ((loop (lambda (condition body environment next)
+ (lambda (statement environment return next break continue currclass parent globalEnv throw)
+   (letrec ((loop (lambda (condition body environment next throw2)
                ;if the condition is true, call Mstatement, with the approriate next, break, annd continue
                     ;else call next
-               (if (eval-expression condition environment pprefix currclass parent globalEnv)
-                  (Mstatement body environment return (lambda (env) (loop condition body env next)) (lambda (env) (next env)) 
-                             (lambda (env) (loop condition body env next)) currclass parent globalEnv)
+               (if (eval-expression condition environment pprefix currclass parent globalEnv throw2)
+                  (Mstatement body environment return (lambda (env) (loop condition body env next throw2)) (lambda (env) (next env)) 
+                             (lambda (env) (loop condition body env next throw2)) currclass parent globalEnv throw2)
                   (next environment)))))
-       (loop (whilecondition statement) (whilebody statement) environment next))))
+       (loop (whilecondition statement) (whilebody statement) environment next throw))))
 
 ;calls assignment when theres a declaration, with parameter assigntype of 'declaration
 (define declarevar
-  (lambda (statement newenvironment oldenvironment currclass parent globalEnv)
+  (lambda (statement newenvironment oldenvironment currclass parent globalEnv throw)
     (cond
       ;if this was of the form (var x) with no value, call assign with value of 'error
       ;note (cddr statement) is used to see if there is a value given: this may need to be changed if parser changes
-      ((null? (cddr statement)) (assign (getvarname statement) 'error newenvironment oldenvironment 'declaration currclass parent globalEnv))
+      ((null? (cddr statement)) (assign (getvarname statement) 'error newenvironment oldenvironment 'declaration currclass parent globalEnv throw))
       ;else call assign with the value 
-      (else (assign (getvarname statement) (getvarvalue statement) newenvironment oldenvironment 'declaration currclass parent globalEnv)))))
+      (else (assign (getvarname statement) (getvarvalue statement) newenvironment oldenvironment 'declaration currclass parent globalEnv throw)))))
 
 (define getstaticvars
   (lambda (classdef)
@@ -281,10 +356,62 @@
   (lambda (class globalEnv)
     (cadr (lookupClass class globalEnv))))
 
+(define findclassmethods
+  (lambda (class globalEnv)
+    (caddr (findclassbody class globalEnv))))
+
+(define findclassinstmethods
+  (lambda (class globalEnv)
+    (if (null? class)
+        '()
+        (append (delayer (cddadr (lookupClass class globalEnv)) '()) (findclassinstmethods (findparent class globalEnv) globalEnv)))))
+       
+  
+
+(define delayer
+  (lambda (l acc)
+    (cond
+      ((null? l) acc)
+      (else (delayer (cdr l) (cons (caar l) acc))))))
+
 (define getnonstaticvars
   (lambda (class globalEnv)
     (cadr (findclassbody class globalEnv))))
-      
+
+;this gets the default values of nonstatic variables in a class: this is for building an object closure
+;these values will be linked to their corresponding variables when the object instance environment must be called
+(define getnonstaticvarsvalues
+  (lambda (class globalEnv)
+    (letrec ((vars (getnonstaticvars class globalEnv))
+             (loop (lambda (varlist currclass)
+                     (cond
+                       ((and (null? varlist) (null? (findparent currclass globalEnv))) '())
+                       ((null? varlist) (getnonstaticvarsvalues (findparent currclass globalEnv) globalEnv))
+                       (else (cons (box (unbox (cadar varlist))) (loop (cdr varlist) currclass)))))))
+      (loop vars class))))
+
+;this gets the names of nonstatic variables in a class: for building an object environment (not the closure)
+(define getnonstaticvarsnames
+  (lambda (class globalEnv)
+    (letrec ((vars (getnonstaticvars class globalEnv))
+             (loop (lambda (varlist currclass)
+                     (cond
+                       ((and (null? varlist) (null? (findparent currclass globalEnv))) '())
+                       ((null? varlist) (getnonstaticvarsnames (findparent currclass globalEnv) globalEnv))
+                       (else (cons (caar varlist) (loop (cdr varlist) currclass)))))))
+      (loop vars class))))
+ 
+;this gets the static variables of a class for an object closure
+(define findstaticvarsRecurse
+  (lambda (class globalEnv)
+    (if (null? (findparent class globalEnv))
+        (findstaticvars class globalEnv)
+        (cons (car (findstaticvars class globalEnv)) (findstaticvarsRecurse (findparent class globalEnv) globalEnv)))))
+
+;This is what is called for the new operator. It builds an object closure
+(define buildObject
+  (lambda (class globalEnv)
+    (list class (getnonstaticvarsvalues class globalEnv) (findstaticvarsRecurse class globalEnv) (findclassinstmethods class globalEnv))))
 
 ;so far can do complicated assignments with one =, but can not do nested assignments with multiple ='s
 ;assigntype is 'declarataion if this is coming from a (var x expression) value
@@ -296,41 +423,47 @@
 ;Note assign takes an environment of the form (()) or ( ((x 3) (y 2)) ((z 2) (x 5)) ), or layers of environments
 ;whereas assignLayer takes an environment of the form () or ((x 3) (y 2)), or a single environment
 (define assign
-  (lambda (varname value environment original-environment assigntype currclass parent globalEnv)
+  (lambda (varname value environment original-environment assigntype currclass parent globalEnv throw)
     (cond
       ((and (dot-expression? varname) (not (super? varname)) (not (eq? (lookupClass (cadr varname) globalEnv) 'classNotFound)))
-       (assign (caddr varname) value (findstaticvars (cadr varname) globalEnv) original-environment assigntype currclass parent globalEnv))
-      ((and (dot-expression? varname) (not (super? varname))) (error "Class was not found"))
+       (assign (caddr varname) value (findstaticvars (cadr varname) globalEnv) original-environment assigntype currclass parent globalEnv throw))
+      ((and (dot-expression? varname) (isObjectDot? varname globalEnv)) 
+       (assign (caddr varname) value (buildInstanceEnv (cadr varname) environment globalEnv (getInstanceClass (cadr varname) environment globalEnv))
+                                               original-environment assigntype '() '() globalEnv throw))
       ((and (dot-expression? varname) (super? varname) (not (null? parent)))
-       (assign (caddr varname) value (getstaticvars (lookupSuper varname currclass parent globalEnv)) original-environment assigntype currclass parent globalEnv))
+       (assign (caddr varname) value (getstaticvars (lookupSuper varname currclass parent globalEnv throw)) original-environment assigntype currclass parent globalEnv throw))
+      ((and (not (null? environment)) (not (null? (cdr environment))) (null? (car environment))) (assign varname value (cdr environment) original-environment assigntype currclass parent globalEnv throw))
       ((and (dot-expression? varname) (super? varname) (null? parent)) (error "No parent"))
       ((and (null? environment) (eq? assigntype 'assign) (null? parent)) (error "variable not declared"))
-      ((and (null? environment) (eq? assigntype 'assign)) (assign varname value (findclassbody (car parent) globalEnv)
+      ((and (null? environment) (eq? assigntype 'assign)) (assign varname value (findclassbody (car parent) globalEnv throw)
                                                                   original-environment assigntype (car parent) 
-                                                                  (findparent (car parent) globalEnv) globalEnv))
+                                                                  (findparent (car parent) globalEnv throw) globalEnv throw))
       ((and (eq? assigntype 'declaration) (eq? (lookupLayer varname (car environment)) '())) 
-       (cons (assignLayer varname value (car environment) original-environment assigntype currclass parent globalEnv) (cdr environment)))
+       (cons (assignLayer varname value (car environment) original-environment assigntype currclass parent globalEnv throw) (cdr environment)))
       ((eq? assigntype 'declaration) (error "redefining of variable"))
       ((eq? (lookupLayer varname (car environment)) '()) (cons (car environment) (assign varname value (cdr environment) 
-                                                                                         original-environment assigntype currclass parent globalEnv)))
-     (else (cons (assignLayer varname value (car environment) original-environment assigntype currclass parent globalEnv) (cdr environment))))))
+                                                                                         original-environment assigntype currclass parent globalEnv throw)))
+      (else (cons (assignLayer varname value (car environment) original-environment assigntype currclass parent globalEnv throw) (cdr environment))))))
 
   ;assignLayer assigns a value for a specific layer
 (define assignLayer
-  (lambda (varname value environment original-environment assigntype currclass parent globalEnv)
+  (lambda (varname value environment original-environment assigntype currclass parent globalEnv throw)
     (cond
       ;if the environment is empty and this is an assignment, then the variable was not declared
       ((and (null? environment) (eq? assigntype 'assign)) (error "variable not declared"))
       ;if the environment is empty and this is a declaration w/o assignment value, then add the variable with value 'error
       ((and (null? environment) (eq? assigntype 'declaration) (eq? value 'error) (cons (list varname (box 'error)) '())))
       ;if this variable has a non-error assignment value and is a declaration, evaluate the value and assign it
-      ((and (null? environment) (eq? assigntype 'declaration)) (cons (list varname (box (eval-expression value original-environment pprefix currclass parent globalEnv))) '()))
+      ((and (null? environment) (eq? assigntype 'declaration)) (cons (list varname (box (eval-expression value original-environment pprefix currclass parent globalEnv throw))) '()))
+     ; ((and (not (null? environment)) (not (null? (cdr environment))) (null? (car environment)))
       ;if the var is reached but this is a declaration, the variable is being redeclared
-      ((and (eq? (caar environment) varname) (eq? assigntype 'declaration) (error "redefining of variable")))
+      ((and (not (null? environment)) (not (null? (cdr environment))) (null? (car environment)))
+       (assignLayer varname value (cdr environment) original-environment assigntype currclass parent globalEnv throw))
+      ((and (eq? assigntype 'declaration) (eq? (caar environment) varname)) (error "redefining of variable"))
       ;if the var is reached otherwise, update its value
-      ((eq? (caar environment) varname) (begin (set-box! (cadar environment) (eval-expression value original-environment pprefix currclass parent globalEnv)) environment))
+      ((eq? (caar environment) varname) (begin (set-box! (cadar environment) (eval-expression value original-environment pprefix currclass parent globalEnv throw)) environment))
       ;otherwise recurse
-      (else (cons (car environment) (assignLayer varname value (cdr environment) original-environment assigntype currclass parent globalEnv))))))
+      (else (cons (car environment) (assignLayer varname value (cdr environment) original-environment assigntype currclass parent globalEnv throw))))))
 
 
 
@@ -352,23 +485,160 @@
     (cond
       ((null? environment) '())
       ((and (null? (car environment)) (not (null? (cdr environment)))) (lookupLayer var (car (cdr environment))))
+      ((null? (car environment)) '())
       ((eq? (caar environment) var) (unbox (cadar environment)))
       (else (lookupLayer var (cdr environment))))))
 
+(define hasVar?
+  (lambda (varname environment)
+    (cond
+      ((null? environment) #f)
+      ((null? (lookupLayer varname (car environment))) (hasVar? varname (cdr environment)))
+      (else #t))))
+
+
+;fname params environment currclass parent globalEnv throw
 ;lookup determines which layer of the environment (or the first appearance) contains var, and calls lookupList to get its value
 (define lookup
-  (lambda (var environment isdot parent globalEnv) 
+  (lambda (var environment isdot parent globalEnv throw)
     (cond
+      ;if the var is a function call, return whatever the function returns
+      ((funcall? var) (call-function (cadr var) (cddr var) environment '() parent globalEnv throw))
+      ;((box? environment) (lookup var (buildInstanceEnv2 environment globalEnv) isdot parent globalEnv throw))
+      ;If the var is a dot expression with a function call, look up the values in the object instance of the returned object of the function
+      ((and (dot-expression? var) (funcall? (cadr var))) (lookup (caddr var) 
+                                                                 (buildInstanceEnv2 (call-function (cadadr var) (cddadr var)
+                                                                                                  environment '() parent globalEnv throw)
+                                                                                   globalEnv)
+                                                                 isdot parent globalEnv throw))
+      ;if the dot expression is super, call this.super instead (not sure if this works or is used)
+      ((and (dot-expression? var) (super? (cadr var)) (hasVar? 'this environment)) 
+       (lookupInObj (caddr var) (cadr var) environment globalEnv throw))
       ((and (dot-expression? var) (super? (cadr var)) ) (lookup (caddr var) (getstaticvars (lookupSuper var 'error parent globalEnv))
-                                               #t (car (lookupSuper var 'error parent globalEnv)) globalEnv))
-      ((dot-expression? var) (lookup (getfunctionname var) (findstaticvars (cadr var) globalEnv) #t 
-                                     (findparent (cadr var) globalEnv) globalEnv))
+                                               #t (car (lookupSuper var 'error parent globalEnv)) globalEnv throw))
+      ;If the dot expression has an object on the far left, evalueate with lookupInObj
+      ((and (dot-expression? var) (isObjectDot? var globalEnv)) (lookupInObj (caddr var) (cadr var) environment globalEnv throw #t))
+      ((dot-expression? var) (lookup (getfunctionname var) (findstaticvars (cadr var) globalEnv ) #t 
+                                     (findparent (cadr var) globalEnv) globalEnv throw))
       ((and (null? environment) isdot (not (null? parent))) (lookup var (findstaticvars (car parent) globalEnv)
-                                               #t (findparent parent globalEnv) globalEnv))
+                                               #t (findparent parent globalEnv) globalEnv throw))
       ((null? environment) (error "variable not declared"))
       ((not (null? (lookupLayer var (car environment)))) (lookupLayer var (car environment)))
-      (else (lookup var (cdr environment) isdot parent globalEnv)))))
+      (else (lookup var (cdr environment) isdot parent globalEnv throw)))))
 
+;returns true if a var is an object
+(define isObject?
+  (lambda (var globalEnv)
+    (if (list? var)
+        #f
+        (and (eq? 'classNotFound (lookupClass var globalEnv))))))
+
+;returns true if the given closure is of type Object (as opposed to function, number, or boolean)
+(define isObjType?
+  (lambda (l)
+    (cond
+      ((box? l) (isObjectType? (unbox l)))
+      (else (and (list? l) (not (list? (car l))))))))
+
+ 
+;This handles looking up items in an object.
+;This is called for function calls or dot expressions involving objects
+(define lookupInObj
+  (lambda (var obj env globalEnv throw isFirst)
+    (cond
+      ((and (funcall? obj) (dot-expression? (cadr obj))) 
+       (lookupInObj var (car (cdadr obj)) 
+                    (buildInstanceEnv2
+                     (call-function (cadr(cdadr obj)) (cddr obj) 
+                                    (buildInstanceEnv obj env globalEnv (getInstanceClass obj env globalEnv))
+                                    '() '() globalEnv throw)
+                     globalEnv) globalEnv throw #f))
+      ((and (boolean? var) (not var) (list? obj) (not (funcall? obj))) (lookupInObj (caddr obj) (cadr obj) env globalEnv throw #f))
+      ((and (boolean? var) (not var) (list? obj)) (lookupInObj (caddr obj) (cadr obj) env globalEnv throw #f))
+      ((and (boolean? var) (not var)) (lookupInObj 'this obj (buildInstanceEnv obj env globalEnv (getInstanceClass obj env globalEnv))
+                                                   globalEnv throw #f) )
+      ((and (isObject? obj globalEnv) isFirst (not (isObjType? (lookup var (buildInstanceEnv obj env globalEnv (getInstanceClass obj env globalEnv)) #t '() globalEnv throw))))
+       (lookup var (buildInstanceEnv obj env globalEnv (getInstanceClass obj env globalEnv)) #t '() globalEnv throw))
+      ((and (isObject? obj globalEnv) isFirst)
+       (buildInstanceEnv2 (lookup var (buildInstanceEnv obj env globalEnv (getInstanceClass obj env globalEnv)) #t '() globalEnv throw)
+                          globalEnv))
+      ((and (isObject? obj globalEnv) (isObjType? (lookup var env #t '() globalEnv throw)))
+       (buildInstanceEnv2 (lookup var env #t '() globalEnv throw) globalEnv))
+      ((isObject? obj globalEnv) (lookup var env #t '() globalEnv throw))
+      (else (lookupInObj var (getnextobj obj) (lookupInObj (getnextobj obj) (cadr obj) env globalEnv throw #t) globalEnv throw #f)))))
+
+;abstraction                                         
+(define getnextobj
+  (lambda (obj)
+    (caddr obj)))
+
+;gets what class a given object is.  This was important so that the parent could be found and then super could be made
+(define getInstanceClass
+  (lambda (obj env globalEnv) 
+    (cond
+      ((list? obj) (getInstanceClass (cadr obj) env globalEnv))
+      (else (car (lookup obj env #t '() globalEnv (lambda (v) v)))))))
+
+;This builds the instance environment of a function given its closure and the global Environment
+;this is different from buildInstanceEnv which builds the instance environment by first getting the object closure.
+;Having the flexibility between both made coding a little easier. Now that I'm done though, probably only one is necessary.
+;Note that the way I handled this and super is by simply making them objects in the instance environement. So this.function()
+;would be handled exactly the same as localObject.function().  Likewise with super, and this is recursive so that all parents
+;have a super instance in their nested super.  The integrity of the variables is kept because of blocks.
+;NOTE that I know the way super is handled here is not fully correct because is you called say super.f(), and from within f()
+;there was a this, the this would not necessarily reach the variables they are supposed to (ie overwritten methods or default values).
+;I did ATTEMPT to make this possible with the changeclass method and by cdring nonstatic variable in the buildNonStatic function.
+;I will * these attempts.
+(define buildInstanceEnv2
+  (lambda (objectClosure globalEnv)
+    (letrec ((obj objectClosure)
+             (nonstaticvarsvalues (cadr obj))
+             (class (car obj))
+             (staticvars (caddr obj))
+             (body (cadddr obj))) 
+       (list (list (list 'this (box obj))) (buildNonStatic (getnonstaticvarsnames class globalEnv) nonstaticvarsvalues)
+            staticvars body (if (null? (findparent class globalEnv))
+                                '()
+                                (list (list 'super (box (buildInstanceEnv2 (changeclass objectClosure globalEnv) globalEnv ))  )))))))
+;this function changes the listed class in an objects closure so that when making the supers the variables link correctly
+(define changeclass
+  (lambda (objclosure globalEnv)   ;*
+    (letrec ((class (car objclosure))
+             (parent (findparent class globalEnv)))
+      (cons parent (cdr objclosure)))))
+
+;this function builds an instance environment given the object, local environment, global environment, and its class
+;It works very much the same way as buildInstanceEnv2, except it finds the objects closure on its own, and you give it
+;the class (so that when you make a super, you pass the parent class as the class).
+(define buildInstanceEnv
+  (lambda (obj env globalEnv class) 
+    (letrec ((objectClosure (lookup obj env #t '() globalEnv (lambda (v) v)))
+             ;(class (car objectClosure))
+             (nonstaticvarsvalues (cadr objectClosure))
+             (staticvars (caddr objectClosure))
+             (body (cadddr objectClosure)))
+      (list (list (list 'this (box objectClosure))) (buildNonStatic (getnonstaticvarsnames class globalEnv) nonstaticvarsvalues)
+            staticvars body (if (null? (findparent class globalEnv))
+                                '()
+                                (list (list 'super (box (buildInstanceEnv obj env globalEnv (findparent class globalEnv))))))))))
+;this function links nonstatic variables to their values when buillding object instance variables.
+(define  buildNonStatic
+  (lambda (varnames varvalues)
+    (cond
+      ((and (null? varnames) (null? varvalues)) '())
+      ((or (null? varnames) (null? varvalues)) '())
+      ((not (eqv? (length varnames) (length varvalues))) (buildNonStatic varnames (cdr varvalues))) ; *
+      ;* Note that for this to work more correctly, I would not only cdr these values, but move what I am cdring off
+      ;to the back, so that the variables could still be reached if they are not overwritten
+      (else (cons (list (car varnames) (car varvalues)) (buildNonStatic (cdr varnames) (cdr varvalues)))))))
+          
+;this returns true if a dot expression has an object on its farthest left side.
+(define isObjectDot?
+  (lambda (dotexpr globalEnv)
+    (cond
+      ((list? (cadr dotexpr)) (isObjectDot? (cadr dotexpr) globalEnv))
+      (else (not (className? (cadr dotexpr) globalEnv))))))
+;this gets the static variables of a given class.
 (define findstaticvars
   (lambda (class globalEnv)
     (getstaticvars (lookupClass class globalEnv))))
@@ -380,8 +650,8 @@
 
 ;returns the value of the return expression
 (define Mreturn
-  (lambda (code environment return currclass parent globalEnv)
-    (return (make-english (eval-expression (returnexpression code) environment pprefix currclass parent globalEnv)))))
+  (lambda (code environment return currclass parent globalEnv throw)
+    (return (make-english (eval-expression (returnexpression code) environment pprefix currclass parent globalEnv throw)))))
 
 ;translates scheme words to "English," for now this is only for #t and #f to 'true and 'false
 (define make-english
@@ -393,14 +663,14 @@
 
 ;evaluates an if statement
 (define evaluate-if
-  (lambda (ifstatement environment return next break continue currclass parent globalEnv)
+  (lambda (ifstatement environment return next break continue currclass parent globalEnv throw)
     (cond
       ;checks if the if statement is true, returns the state ofthe expression if it is
-      ((eval-expression (ifcond ifstatement) environment pprefix currclass parent globalEnv) (Mstatement (nextstatement (ifexpr ifstatement)) environment return next break continue currclass parent globalEnv))
+      ((eval-expression (ifcond ifstatement) environment pprefix currclass parent globalEnv throw) (Mstatement (nextstatement (ifexpr ifstatement)) environment return next break continue currclass parent globalEnv throw))
       ;if the condition was false and there is no else, the continue with the remaining code
       ((null? (ifelse ifstatement)) (next environment))
       ;if there was an else, then Mstate with the else's if statement
-      (else (Mstatement (nextstatement (ifelse ifstatement)) environment return next break continue currclass parent globalEnv)))))
+      (else (Mstatement (nextstatement (ifelse ifstatement)) environment return next break continue currclass parent globalEnv throw)))))
 
 ;returns the condition expression in the if statement
 (define ifcond
@@ -417,6 +687,10 @@
   (lambda (ifstatement)
     (cdddr ifstatement)))
 
+(define new?
+  (lambda (expr)
+    (and (list? expr) (eq? 'new (car expr)))))
+
 ;This was built off of what was done in class.
 ;eval-expression will evaluate an expression, returning a number or #t or #f
 ;Note, this is Mvalue and Mboolean combined
@@ -425,7 +699,7 @@
 ; postfix, or infix format
 ; Call as (eval-expression '(3 + 4) '() infix)
 (define eval-expression
-  (lambda (expression environment form currclass parent globalEnv)
+  (lambda (expression environment form currclass parent globalEnv throw) 
     ((lambda (operator left-operand right-operand)
        (cond
          ;if the expression is 'error, that means an unitialized variable was being used (lookup returned 'error)
@@ -437,46 +711,48 @@
          ;if the expression is 'false, translate it to #f
          ((and (not (number? expression)) (eq? expression 'false)) #f)
          ;if the expression is an undeclared var, return an error
-         ((and (not (list? expression)) (not (number? expression)) (eq? (lookup expression environment #t parent globalEnv) '())) (error "variable used before being declared"))
+         ((and (not (list? expression)) (not (number? expression)) (eq? (lookup expression environment #t parent globalEnv throw) '())) (error "variable used before being declared"))
          ;if the expression is an uninitialized var, return an error
-         ((and (not (list? expression)) (not (number? expression)) (eq? 'error (lookup expression environment #t parent globalEnv))) (error "error: Var not assigned a value"))
+         ((and (not (list? expression)) (not (number? expression)) (eq? 'error (lookup expression environment #t parent globalEnv throw))) (error "error: Var not assigned a value"))
          ;if the expression is an initialized var, return its value
-         ((and (not (list? expression)) (not (number? expression))) (lookup expression environment #t parent globalEnv))
+         ((and (not (list? expression)) (not (number? expression))) (lookup expression environment #t parent globalEnv throw))
          ;the next few lines perform arithmetic operations
-         ((dot-expression? expression) (lookup expression environment #t parent globalEnv))
-         ((funcall? expression) (call-function (cadr expression) (cddr expression) environment currclass parent globalEnv))
-         ((eq? '+ (operator expression)) (+ (eval-expression (left-operand expression) environment form currclass parent globalEnv)
-                                            (eval-expression (right-operand expression) environment form currclass parent globalEnv)))
+         ((new? expression)  (buildObject (cadr expression) globalEnv))
+         ;lookup is called for all dot expressions
+         ((dot-expression? expression) (lookup expression environment #t parent globalEnv throw))
+         ((funcall? expression) (call-function (cadr expression) (cddr expression) environment currclass parent globalEnv throw))
+         ((eq? '+ (operator expression)) (+ (eval-expression (left-operand expression) environment form currclass parent globalEnv throw)
+                                            (eval-expression (right-operand expression) environment form currclass parent globalEnv throw)))
          ;THIS LINE BELOW MUST BE CHANGED IF PARSER IS NO LONGER PREFIX to allow negatives support ( like -(* 5 9))
-         ((and (eq? '- (operator expression)) (null? (cddr expression))) (- 0 (eval-expression (cadr expression) environment form currclass parent globalEnv)))
-         ((eq? '- (operator expression)) (- (eval-expression (left-operand expression) environment form currclass parent globalEnv)
-                                            (eval-expression (right-operand expression) environment form currclass parent globalEnv)))
-         ((eq? '* (operator expression)) (* (eval-expression (left-operand expression) environment form currclass parent globalEnv)
-                                            (eval-expression (right-operand expression) environment form currclass parent globalEnv)))
-         ((eq? '/ (operator expression)) (floor (/ (eval-expression (left-operand expression) environment form currclass parent globalEnv)
-                                                   (eval-expression (right-operand expression) environment form currclass parent globalEnv))))
-         ((eq? '% (operator expression)) (modulo (eval-expression (left-operand expression) environment form currclass parent globalEnv)
-                                                 (eval-expression (right-operand expression) environment form currclass parent globalEnv)))
+         ((and (eq? '- (operator expression)) (null? (cddr expression))) (- 0 (eval-expression (cadr expression) environment form currclass parent globalEnv throw)))
+         ((eq? '- (operator expression)) (- (eval-expression (left-operand expression) environment form currclass parent globalEnv throw)
+                                            (eval-expression (right-operand expression) environment form currclass parent globalEnv throw)))
+         ((eq? '* (operator expression)) (* (eval-expression (left-operand expression) environment form currclass parent globalEnv throw)
+                                            (eval-expression (right-operand expression) environment form currclass parent globalEnv throw)))
+         ((eq? '/ (operator expression)) (floor (/ (eval-expression (left-operand expression) environment form currclass parent globalEnv throw)
+                                                   (eval-expression (right-operand expression) environment form currclass parent globalEnv throw))))
+         ((eq? '% (operator expression)) (modulo (eval-expression (left-operand expression) environment form currclass parent globalEnv throw)
+                                                 (eval-expression (right-operand expression) environment form currclass parent globalEnv throw)))
          ;check if eqv? is okay
          ;the next few lines perform boolean operators
-         ((eq? '== (operator expression)) (eqv? (eval-expression (left-operand expression) environment form currclass parent globalEnv)
-                                                (eval-expression (right-operand expression) environment form currclass parent globalEnv)))
-         ((eq? '!= (operator expression)) (not (eq? (eval-expression (left-operand expression) environment form currclass parent globalEnv)
-                                                    (eval-expression (right-operand expression) environment form currclass parent globalEnv))))
-         ((eq? '< (operator expression)) (< (eval-expression (left-operand expression) environment form currclass parent globalEnv)
-                                            (eval-expression (right-operand expression) environment form currclass parent globalEnv)))
-         ((eq? '> (operator expression)) (> (eval-expression (left-operand expression) environment form currclass parent globalEnv)
-                                            (eval-expression (right-operand expression) environment form currclass parent globalEnv)))
-         ((eq? '<= (operator expression)) (<= (eval-expression (left-operand expression) environment form currclass parent globalEnv)
-                                              (eval-expression (right-operand expression) environment form currclass parent globalEnv)))
-         ((eq? '>= (operator expression)) (>= (eval-expression (left-operand expression) environment form currclass parent globalEnv)
-                                              (eval-expression (right-operand expression) environment form currclass parent globalEnv)))
-         ((eq? '|| (operator expression)) (or (eval-expression (left-operand expression) environment form currclass parent globalEnv)
-                                              (eval-expression (right-operand expression) environment form currclass parent globalEnv)))
-         ((eq? '&& (operator expression)) (and (eval-expression (left-operand expression) environment form currclass parent globalEnv)
-                                               (eval-expression (right-operand expression) environment form currclass parent globalEnv)))
+         ((eq? '== (operator expression)) (eqv? (eval-expression (left-operand expression) environment form currclass parent globalEnv throw)
+                                                (eval-expression (right-operand expression) environment form currclass parent globalEnv throw)))
+         ((eq? '!= (operator expression)) (not (eq? (eval-expression (left-operand expression) environment form currclass parent globalEnv throw)
+                                                    (eval-expression (right-operand expression) environment form currclass parent globalEnv throw))))
+         ((eq? '< (operator expression)) (< (eval-expression (left-operand expression) environment form currclass parent globalEnv throw)
+                                            (eval-expression (right-operand expression) environment form currclass parent globalEnv throw)))
+         ((eq? '> (operator expression)) (> (eval-expression (left-operand expression) environment form currclass parent globalEnv throw)
+                                            (eval-expression (right-operand expression) environment form currclass parent globalEnv throw)))
+         ((eq? '<= (operator expression)) (<= (eval-expression (left-operand expression) environment form currclass parent globalEnv throw)
+                                              (eval-expression (right-operand expression) environment form currclass parent globalEnv throw)))
+         ((eq? '>= (operator expression)) (>= (eval-expression (left-operand expression) environment form currclass parent globalEnv throw)
+                                              (eval-expression (right-operand expression) environment form currclass parent globalEnv throw)))
+         ((eq? '|| (operator expression)) (or (eval-expression (left-operand expression) environment form currclass parent globalEnv throw)
+                                              (eval-expression (right-operand expression) environment form currclass parent globalEnv throw)))
+         ((eq? '&& (operator expression)) (and (eval-expression (left-operand expression) environment form currclass parent globalEnv throw)
+                                               (eval-expression (right-operand expression) environment form currclass parent globalEnv throw)))
          ;THIS LINE BELOW MUST BE CHANGED IF PARSER IS NO LONGER PREFIX to allow ! operator
-         ((eq? '! (operator expression)) (not (eval-expression (left-operand expression) environment form currclass parent globalEnv) ))
+         ((eq? '! (operator expression)) (not (eval-expression (left-operand expression) environment form currclass parent globalEnv throw) ))
          ;if this line is reached, it means an unknown/undefined operator was used
          (else (error "undefined operator used"))))
      (get-operator form) (get-left-operand form) (get-right-operand form))))
@@ -575,9 +851,9 @@
   (lambda (currclass parent environment globalEnv)
     (legitimize 
      (call/cc (lambda (return)
-       (letrec ((f (lookup 'main environment #f parent globalEnv)))
+       (letrec ((f (lookup 'main environment #f parent globalEnv (lambda (v) v))))
         (Mstate (getfunctionbody f) (addLayer environment)
-                return (lambda (v) v) (lambda (v) v) (lambda (v) v) currclass parent globalEnv)))))))
+                return (lambda (v) v) (lambda (v) v) (lambda (v) v) currclass parent globalEnv (lambda (v) v))))))))
 
 ;checks if the statement is a dot expression
 (define dot-expression?
@@ -600,18 +876,30 @@
         (super? (cadr name))
         (eq? name 'super))))
 
+(define insertthis
+  (lambda (dotexpr)
+    (if (list? dotexpr)
+        (list 'dot (insertthis (cadr dotexpr)) (caddr dotexpr))
+        (list 'dot 'this dotexpr))))
+
 ;given a function call, gets the function call environment
+;dot expressions of objects are recursively handled.
 ;if it is a dot expression, the corresponding class environment is found and returned
 ;else, it is checked if the local environment has the function, and if not, checks the parent(s)
 (define getfunctioncallenv
-  (lambda (fname parent environment origenv globalEnv)
+  (lambda (fname parent environment origenv globalEnv throw)
     (cond
       ((and (dot-expression? fname) (className? (cadr fname) globalEnv))
        (getfunctioncallenv (getfunctionname fname) (findparent (cadr fname) globalEnv) 
-                          (findclassbody (cadr fname) globalEnv) (findclassbody (cadr fname) globalEnv) globalEnv))
+                          (findclassbody (cadr fname) globalEnv) (findclassbody (cadr fname) globalEnv) globalEnv throw))
+       ((and (dot-expression? fname) (isObjectDot? fname globalEnv) (funcall? (cadr fname)))
+       (buildInstanceEnv2 (call-function (cadadr fname) (cddadr fname) environment '() parent globalEnv throw) globalEnv)) 
+      ((and (dot-expression? fname) (isObjectDot? fname globalEnv))
+       (buildInstanceEnv (cadr fname) environment globalEnv (getInstanceClass (cadr fname) environment globalEnv)))
       ((and (dot-expression? fname) (super? (cadr fname)))
-       (getfunctioncallenv (getfunctionname fname) (findparent (car parent) globalEnv) (findclassbody (car parent) globalEnv)
-                           (findclassbody (car parent) globalEnv) globalEnv))
+       (getfunctioncallenv (getfunctionname fname) (findparent (car parent) globalEnv) (findclassbody (car parent) globalEnv )
+                           (findclassbody (car parent) globalEnv) globalEnv throw))
+      
       ((null? environment) (getfunctioncallenv fname (if (eq? 'classNotFound (lookupClass parent globalEnv))
                                                                         (error "There is no parent to this class")
                                                                         (findparent parent globalEnv))
@@ -621,28 +909,27 @@
                                                               (if (eq? 'classNotFound (findparent parent globalEnv))
                                                                         (error "There is no parent to this class")
                                                                         (findclassbody parent globalEnv))
-                                                              globalEnv))
-      ((null? (lookupLayer fname (car environment))) (getfunctioncallenv fname parent (cdr environment) origenv globalEnv))
+                                                              globalEnv throw))
+      ((null? (lookupLayer fname (car environment))) (getfunctioncallenv fname parent (cdr environment) origenv globalEnv throw))
       (else origenv))))
 
-;abstration to get the function name
+;abstraction to get the function name
 (define getfunctionname
   (lambda (expr)
     (if (dot-expression? expr)
         (caddr expr)
         expr)))
-                                                              
 
 ;calls a function
 ;first gets correct environment where the function is located, then gets the function closure from that environment
 ;then calls the function using the environment built by the closure consed to the function's environment
-(define call-function
-  (lambda (fname params environment currclass parent globalEnv)
+(define call-function 
+  (lambda (fname params environment currclass parent globalEnv throw)
      (call/cc (lambda (return2)
-       (letrec ((functioncallenv (getfunctioncallenv fname parent environment environment globalEnv))
-                (f (lookup (getfunctionname fname) functioncallenv #f parent globalEnv)))
-         (Mstate (cadr f) (addLayer (cons (car (list ((caddr f) (car f) params environment currclass parent globalEnv))) functioncallenv)) return2 (lambda (v) v) 
-                  (lambda (v) v) (lambda (v) v) currclass parent globalEnv)
+       (letrec ((functioncallenv (getfunctioncallenv fname parent environment environment globalEnv throw))
+                (f (lookup (getfunctionname fname) functioncallenv #f parent globalEnv throw)))
+         (Mstate (cadr f) (addLayer (cons (car (list ((caddr f) (car f) params environment currclass parent globalEnv throw))) functioncallenv)) return2 (lambda (v) v) 
+                  (lambda (v) v) (lambda (v) v) currclass parent globalEnv throw)
           environment)))))
   
 ;legitimizes return value: ie, if it is not a number or boolean, that means a return statement was not reached
@@ -653,24 +940,24 @@
            (eq? 'true returnvalue)
            (eq? 'false returnvalue)
            ) returnvalue)
-      (else (error "No return reached")))))
+      (else (error "No return reached")))))  ;returnvalue))));for debugging
 
 ;uncomment to run tests
-;(display "1A")(interpret "P4test1.txt" "B")
-;(display "2A")(interpret "P4test2.txt" "A")
-;(display "3A")(interpret "P4test3.txt" "A")
-;(display "4A")(interpret "P4test4.txt" "A")
-;(display "5A")(interpret "P4test5.txt" "A")
-;(display "5B")(interpret "P4test5.txt" "B")
-;(display "6A")(interpret "P4test6.txt" "A")
-;(display "6B")(interpret "P4test6.txt" "B")
-;(display "7A")(interpret "P4test7.txt" "A")
-;(display "7B")(interpret "P4test7.txt" "B")
-;(display "8B")(interpret "P4test8.txt" "B")
-;(display "9B")(interpret "P4test9.txt" "B") ;supposed to return error
-;(display "9C")(interpret "P4test9.txt" "C")
-;(display "10")(interpret "P4test10.txt" "Square")
-;(display "11")(interpret "P4test11.txt" "A")
+;(display "1A")(interpret "test1.txt" "A")
+;(display "2A")(interpret "test2.txt" "A")
+;(display "3A")(interpret "test3.txt" "A")
+;(display "4A")(interpret "test4.txt" "A")
+;(display "5A")(interpret "test5.txt" "A")
+;(display "6A")(interpret "test6.txt" "A")
+;(display "7C")(interpret "test7.txt" "C");doesn't work
+;(display "8")(interpret "test8.txt" "Square") ;doesn't work
+;(display "9")(interpret "test9.txt" "List")
+;(display "10")(interpret "test10.txt" "Primes") ;doesn't work
+;(display "11")(interpret "test11.txt" "A")
+;(display "12")(interpret "test12.txt" "A")
+;(display "13")(interpret "test13.txt" "A") ;doesn't work
+;(display "14")(interpret "test14.txt" "A")
+;(display "15")(interpret "test15.txt" "A")
 
 ;Test function: will test a list of testfiles and return the list of their return values
 ;(define doTests
